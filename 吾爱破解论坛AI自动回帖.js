@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         吾爱破解论坛AI自动回帖
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
+// @version      1.2.1
 // @description  使用AI在吾爱破解论坛自动回帖，根据帖子内容生成智能回复
 // @author       逝去de枫
 // @match        https://www.52pojie.cn/forum-10-*.html
@@ -23,33 +23,33 @@
     const CONFIG = {
         domain: 'https://www.52pojie.cn',
         username: '你的ID',
-
+        
         // 回帖间隔时间区间（秒）
         minInterval: 160,  // 2分40秒
         maxInterval: 240,  // 4分钟
-
+        
         // 每小时回帖次数区间
         minPostsPerHour: 8,
         maxPostsPerHour: 12,
-
+        
         // 页面搜索区间
-        minPageSearch: 5,
+        minPageSearch: 8,
         maxPageSearch: 15,
-
+        
         // 超时时间区间（毫秒）
         minTimeout: 25000,
         maxTimeout: 35000,
-
+        
         // AI相关配置
         aiModel: "gemini-2.5-flash",
         aiMaxRetries: 3,
         minAiTimeout: 25000,
         maxAiTimeout: 35000,
-
+        
         // 错误刷新延迟区间（毫秒）
         minErrorRefreshDelay: 45000,
         maxErrorRefreshDelay: 75000,
-
+        
         // 回复检查区间
         minReplyChecks: 25,
         maxReplyChecks: 35
@@ -87,7 +87,7 @@
             this.nextReplyCountdown = 0;
             this.errorRefreshCountdown = 0;
             this.isAutoReplyEnabled = GM_getValue(STORAGE_KEYS.AUTO_REPLY_ENABLED, true);
-            this.aiApiKey = GM_getValue(STORAGE_KEYS.AI_API_KEY, '你的Key');
+            this.aiApiKey = GM_getValue(STORAGE_KEYS.AI_API_KEY, '你的key');
             this.init();
         }
 
@@ -106,12 +106,29 @@
             return style && style.includes('color:');
         }
 
-        // 获取帖子一楼内容
-        getFirstPostContent() {
+        // 修改：获取帖子标题和正文内容
+        getPostContent() {
+            let content = '';
+            
+            // 获取帖子标题
+            const titleElement = document.querySelector('h1.ts span#thread_subject');
+            if (titleElement) {
+                const title = titleElement.textContent.trim();
+                content += `标题：${title}\n\n`;
+            }
+            
+            // 获取帖子正文内容
             const firstPost = document.querySelector('.plhin:first-child .t_f, .psth:first-child .t_f, [id^="postmessage_"]:first-child');
             if (firstPost) {
-                return firstPost.textContent.trim().substring(0, 1000);
+                const body = firstPost.textContent.trim();
+                content += `正文：${body}`;
             }
+            
+            // 如果获取到了内容，限制总长度
+            if (content) {
+                return content.substring(0, 1500); // 稍微增加长度限制以容纳标题
+            }
+            
             return null;
         }
 
@@ -121,20 +138,20 @@
                 throw new Error('AI API Key未配置');
             }
 
-            const prompt = `请根据以下帖子内容，生成一个10-50字之间的简短回复，要求像真人一样自然，不要使用固定模板：
+            const prompt = `请根据以下帖子内容（包含标题和正文），生成一个10-50字之间的简短回复，要求像真人一样自然，不要使用固定模板：
 
-帖子内容：${postContent}
+${postContent}
 
 请用中文回复：`;
 
             try {
                 const response = await this.makeAIRequest(prompt);
                 const reply = response.text.trim();
-
+                
                 if (reply.length < 10 || reply.length > 50) {
                     throw new Error(`AI回复长度不符合要求: ${reply.length}字`);
                 }
-
+                
                 return reply;
             } catch (error) {
                 console.error('AI生成回复失败:', error);
@@ -204,9 +221,9 @@
 
             panel.innerHTML = `
                 <div style="font-weight: bold; color: #4CAF50; margin-bottom: 10px; text-align: center; font-size: 14px;">
-                    吾爱破解AI自动回帖 v1.2.0
+                    吾爱破解AI自动回帖 v1.2.1
                 </div>
-
+                
                 <!-- 随机配置信息 -->
                 <div style="background: #fff8e1; padding: 8px; border-radius: 4px; margin-bottom: 10px;">
                     <div style="font-weight: bold; color: #ff8f00; margin-bottom: 5px;">随机配置信息:</div>
@@ -215,7 +232,7 @@
                     <div style="margin-bottom: 3px;"><span>页面搜索范围: </span><span id="page-search-range">${CONFIG.minPageSearch}-${CONFIG.maxPageSearch}</span> 页</div>
                     <div style="font-size: 10px; color: #666;">每次重置时随机生成新值</div>
                 </div>
-
+                
                 <!-- AI配置区域 -->
                 <div style="background: #e3f2fd; padding: 8px; border-radius: 4px; margin-bottom: 10px;">
                     <div style="font-weight: bold; color: #1565C0; margin-bottom: 5px;">AI配置:</div>
@@ -234,31 +251,31 @@
                     <div style="margin-bottom: 5px;"><span>🕐 当前时间: </span><span id="current-time">--</span></div>
                     <div style="margin-bottom: 5px;"><span>🔄 下次重置: </span><span id="next-reset-time">--</span></div>
                 </div>
-
+                
                 <div style="background: #fff3cd; padding: 8px; border-radius: 4px; margin-bottom: 10px;">
                     <div style="font-weight: bold; color: #856404; margin-bottom: 5px;">状态信息:</div>
                     <div id="auto-reply-status" style="min-height: 40px; color: #856404;">初始化中...</div>
                 </div>
-
+                
                 <div style="background: #d1ecf1; padding: 8px; border-radius: 4px; margin-bottom: 10px;">
                     <div style="font-weight: bold; color: #0c5460; margin-bottom: 5px;">统计信息:</div>
                     <div style="margin-bottom: 3px;"><span>已回复帖子: </span><span id="replied-count">0</span></div>
                     <div style="margin-bottom: 3px;"><span>今日回复: </span><span id="today-count">0</span></div>
                     <div><span>最后回复: </span><span id="last-reply-time">--</span></div>
                 </div>
-
+                
                 <div style="display: flex; gap: 5px; margin-bottom: 10px;">
                     <button id="toggle-auto-reply" style="flex: 1; padding: 8px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold;">
                         ${this.isAutoReplyEnabled ? '⏸️ 暂停自动回帖' : '▶️ 开始自动回帖'}
                     </button>
                     <button id="reset-data" style="flex: 1; padding: 8px; background: #ff9800; color: white; border: none; border-radius: 4px; cursor: pointer;">🔄 重置数据</button>
                 </div>
-
+                
                 <div style="display: flex; gap: 5px; margin-bottom: 10px;">
                     <button id="force-next-page" style="flex: 1; padding: 6px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;">📖 强制下一页</button>
                     <button id="force-check" style="flex: 1; padding: 6px; background: #9C27B0; color: white; border: none; border-radius: 4px; cursor: pointer;">🔍 强制检查</button>
                 </div>
-
+                
                 <div style="font-size: 10px; color: #666; text-align: center; border-top: 1px solid #ddd; padding-top: 5px;">
                     域名: ${CONFIG.domain}<br>
                     间隔: ${CONFIG.minInterval}-${CONFIG.maxInterval}秒 | 小时上限: ${CONFIG.minPostsPerHour}-${CONFIG.maxPostsPerHour}<br>
@@ -321,14 +338,15 @@
 
             // 获取帖子内容并生成AI回复
             try {
-                const postContent = this.getFirstPostContent();
+                // 修改：使用新的获取帖子内容方法
+                const postContent = this.getPostContent();
                 if (!postContent) {
                     throw new Error('无法获取帖子内容');
                 }
 
                 this.updateStatus('正在使用AI生成回复内容...');
                 const aiReply = await this.generateAIReply(postContent);
-
+                
                 this.updateStatus(`AI生成回复: ${aiReply}`);
 
                 // 填写回复内容
@@ -338,7 +356,7 @@
                 const messageTextarea = document.getElementById('fastpostmessage');
                 if (messageTextarea) {
                     messageTextarea.value = aiReply;
-
+                    
                     const submitButton = document.getElementById('fastpostsubmit');
                     if (submitButton) {
                         submitButton.click();
@@ -360,15 +378,15 @@
         setupSimpleReplyCheck(tid) {
             const maxChecks = RandomUtils.getReplyChecks(); // 使用随机检查次数
             let checkCount = 0;
-
+            
             const checkInterval = setInterval(() => {
                 checkCount++;
-
+                
                 // 检查是否已跳转到最后一页（回帖成功）
-                if (window.location.href.includes('#lastpost') ||
-                    window.location.href.includes('&page=') &&
+                if (window.location.href.includes('#lastpost') || 
+                    window.location.href.includes('&page=') && 
                     this.checkCurrentPageForUserReply()) {
-
+                    
                     clearInterval(checkInterval);
                     this.updateStatus('回帖成功确认，返回列表页');
                     setTimeout(() => {
@@ -376,7 +394,7 @@
                     }, 2000);
                     return;
                 }
-
+                
                 // 超时检查
                 if (checkCount >= maxChecks) {
                     clearInterval(checkInterval);
@@ -431,7 +449,7 @@
             GM_setValue(STORAGE_KEYS.LAST_REPLY_TIME, now);
             const currentCount = GM_getValue(STORAGE_KEYS.CURRENT_HOUR_COUNT) + 1;
             GM_setValue(STORAGE_KEYS.CURRENT_HOUR_COUNT, currentCount);
-
+            
             // 设置下一次回复的随机间隔
             const nextInterval = RandomUtils.getInterval();
             GM_setValue(STORAGE_KEYS.CURRENT_INTERVAL, nextInterval);
@@ -559,7 +577,7 @@
                 GM_setValue(STORAGE_KEYS.CURRENT_HOUR_LIMIT, RandomUtils.getPostsPerHour());
                 GM_setValue(STORAGE_KEYS.CURRENT_INTERVAL, RandomUtils.getInterval());
                 GM_setValue(STORAGE_KEYS.CURRENT_HOUR_START, currentHourTimestamp);
-
+                
                 const newLimit = GM_getValue(STORAGE_KEYS.CURRENT_HOUR_LIMIT);
                 const newInterval = GM_getValue(STORAGE_KEYS.CURRENT_INTERVAL);
                 this.updateStatus(`新的一小时开始，重置计数 - 上限:${newLimit}帖/小时, 间隔:${newInterval}秒`);
