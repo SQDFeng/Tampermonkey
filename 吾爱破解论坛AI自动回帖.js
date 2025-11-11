@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         吾爱破解论坛AI自动回帖
 // @namespace    http://tampermonkey.net/
-// @version      1.2.2
+// @version      1.2.3
 // @description  使用AI在吾爱破解论坛自动回帖，根据帖子内容生成智能回复
 // @author       逝去de枫
 // @match        https://www.52pojie.cn/forum-10-*.html
@@ -42,9 +42,10 @@
 
         // AI相关配置
         aiModel: "gemini-2.5-flash",
-        aiMaxRetries: 3,
+        aiMaxRetries: 3,  // AI最大重试次数
         minAiTimeout: 25000,
         maxAiTimeout: 35000,
+        aiRetryDelay: 5000,  // 重试延迟（毫秒）
 
         // 错误刷新延迟区间（毫秒）
         minErrorRefreshDelay: 45000,
@@ -71,14 +72,16 @@
         REPLY_HISTORY: 'reply_history',
         LAST_REPLY_TIME: 'last_reply_time',
         CURRENT_HOUR_COUNT: 'current_hour_count',
-        CURRENT_HOUR_LIMIT: 'current_hour_limit', // 新增：存储当前小时的回帖上限
+        CURRENT_HOUR_LIMIT: 'current_hour_limit',
         CURRENT_HOUR_START: 'current_hour_start',
         CURRENT_PAGE: 'current_page',
         SEARCH_START_PAGE: 'search_start_page',
         LAST_STATUS: 'last_status',
         AUTO_REPLY_ENABLED: 'auto_reply_enabled',
         AI_API_KEY: 'ai_api_key',
-        CURRENT_INTERVAL: 'current_interval' // 新增：存储当前的间隔时间
+        CURRENT_INTERVAL: 'current_interval',
+        AI_ERROR_COUNT: 'ai_error_count', // 新增：AI错误计数
+        LAST_AI_ERROR_TIME: 'last_ai_error_time' // 新增：最后AI错误时间
     };
 
     class AutoReplyManager {
@@ -88,6 +91,8 @@
             this.errorRefreshCountdown = 0;
             this.isAutoReplyEnabled = GM_getValue(STORAGE_KEYS.AUTO_REPLY_ENABLED, true);
             this.aiApiKey = GM_getValue(STORAGE_KEYS.AI_API_KEY, '你的key');
+            this.aiErrorCount = GM_getValue(STORAGE_KEYS.AI_ERROR_COUNT, 0);
+            this.lastAiErrorTime = GM_getValue(STORAGE_KEYS.LAST_AI_ERROR_TIME, 0);
             this.init();
         }
 
@@ -126,16 +131,21 @@
 
             // 如果获取到了内容，限制总长度
             if (content) {
-                return content.substring(0, 1500); // 稍微增加长度限制以容纳标题
+                return content.substring(0, 1500);
             }
 
             return null;
         }
 
-        // AI生成回复内容
+        // AI生成回复内容（添加重试机制）
         async generateAIReply(postContent) {
             if (!this.aiApiKey) {
                 throw new Error('AI API Key未配置');
+            }
+
+            // 检查AI错误频率，防止频繁请求
+            if (this.shouldPauseAIRequests()) {
+                throw new Error('AI请求频繁失败，暂停使用AI一段时间');
             }
 
             const prompt = `请根据以下帖子内容（包含标题和正文），生成一个5-30字之间的简短回复，要求像真人一样自然，不要使用固定模板：
@@ -144,19 +154,89 @@ ${postContent}
 
 请用中文回复：`;
 
-            try {
-                const response = await this.makeAIRequest(prompt);
-                const reply = response.text.trim();
+            let lastError = null;
+            
+            for (let attempt = 1; attempt <= CONFIG.aiMaxRetries; attempt++) {
+                try {
+                    this.updateStatus(`AI生成回复中... (第${attempt}次尝试)`);
+                    const response = await this.makeAIRequest(prompt);
+                    const reply = response.text.trim();
 
-                if (reply.length < 10 || reply.length > 50) {
-                    throw new Error(`AI回复长度不符合要求: ${reply.length}字`);
+                    if (reply.length < 10 || reply.length > 50) {
+                        throw new Error(`AI回复长度不符合要求: ${reply.length}字`);
+                    }
+
+                    // 成功时重置错误计数
+                    this.resetAIErrorCount();
+                    return reply;
+
+                } catch (error) {
+                    lastError = error;
+                    console.error(`AI生成回复失败 (尝试 ${attempt}/${CONFIG.aiMaxRetries}):`, error);
+                    
+                    // 记录错误
+                    this.recordAIError();
+                    
+                    if (attempt < CONFIG.aiMaxRetries) {
+                        const delay = CONFIG.aiRetryDelay * attempt; // 递增延迟
+                        this.updateStatus(`AI请求失败: ${error.message}，${delay/1000}秒后重试...`);
+                        await this.delay(delay);
+                    }
                 }
-
-                return reply;
-            } catch (error) {
-                console.error('AI生成回复失败:', error);
-                throw new Error(`AI生成失败: ${error.message}`);
             }
+
+            // 所有重试都失败
+            throw new Error(`AI生成失败: ${lastError.message} (已重试${CONFIG.aiMaxRetries}次)`);
+        }
+
+        // 检查是否需要暂停AI请求
+        shouldPauseAIRequests() {
+            const now = Date.now();
+            const lastErrorTime = this.lastAiErrorTime;
+            
+            // 如果过去5分钟内错误超过5次，暂停30分钟
+            if (this.aiErrorCount >= 5 && (now - lastErrorTime) < 5 * 60 * 1000) {
+                const pauseRemaining = 30 * 60 * 1000 - (now - lastErrorTime);
+                if (pauseRemaining > 0) {
+                    return true;
+                } else {
+                    // 暂停时间结束，重置计数
+                    this.resetAIErrorCount();
+                }
+            }
+            
+            // 如果过去1小时内错误超过10次，暂停2小时
+            if (this.aiErrorCount >= 10 && (now - lastErrorTime) < 60 * 60 * 1000) {
+                const pauseRemaining = 2 * 60 * 60 * 1000 - (now - lastErrorTime);
+                if (pauseRemaining > 0) {
+                    return true;
+                } else {
+                    this.resetAIErrorCount();
+                }
+            }
+            
+            return false;
+        }
+
+        // 记录AI错误
+        recordAIError() {
+            this.aiErrorCount++;
+            this.lastAiErrorTime = Date.now();
+            GM_setValue(STORAGE_KEYS.AI_ERROR_COUNT, this.aiErrorCount);
+            GM_setValue(STORAGE_KEYS.LAST_AI_ERROR_TIME, this.lastAiErrorTime);
+        }
+
+        // 重置AI错误计数
+        resetAIErrorCount() {
+            this.aiErrorCount = 0;
+            this.lastAiErrorTime = 0;
+            GM_setValue(STORAGE_KEYS.AI_ERROR_COUNT, 0);
+            GM_setValue(STORAGE_KEYS.LAST_AI_ERROR_TIME, 0);
+        }
+
+        // 延迟函数
+        delay(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
         }
 
         makeAIRequest(prompt) {
@@ -177,6 +257,7 @@ ${postContent}
                     }),
                     timeout: timeout,
                     onload: function(response) {
+                        // 处理不同的HTTP状态码
                         if (response.status === 200) {
                             try {
                                 const data = JSON.parse(response.responseText);
@@ -190,6 +271,14 @@ ${postContent}
                             } catch (e) {
                                 reject(new Error('解析AI响应失败'));
                             }
+                        } else if (response.status === 503) {
+                            reject(new Error('AI服务暂时不可用(503)，请稍后重试'));
+                        } else if (response.status === 429) {
+                            reject(new Error('请求频率超限(429)，请稍后重试'));
+                        } else if (response.status === 401) {
+                            reject(new Error('API Key无效(401)'));
+                        } else if (response.status >= 500) {
+                            reject(new Error(`AI服务器错误(${response.status})`));
                         } else {
                             reject(new Error(`AI API错误: ${response.status}`));
                         }
@@ -204,7 +293,7 @@ ${postContent}
             });
         }
 
-        // 简化的控制面板
+        // 简化的控制面板（添加AI错误状态显示）
         createControlPanel() {
             const panel = document.createElement('div');
             panel.id = 'auto-reply-panel';
@@ -221,7 +310,7 @@ ${postContent}
 
             panel.innerHTML = `
                 <div style="font-weight: bold; color: #4CAF50; margin-bottom: 10px; text-align: center; font-size: 14px;">
-                    吾爱破解AI自动回帖 v1.2.2
+                    吾爱破解AI自动回帖 v1.2.3
                 </div>
 
                 <!-- 随机配置信息 -->
@@ -240,7 +329,9 @@ ${postContent}
                         <span>API Key: </span>
                         <input type="password" id="ai-api-key" value="${this.aiApiKey}" style="width: 100%; padding: 2px; margin-top: 3px; font-size: 11px;" placeholder="输入Google AI API Key">
                     </div>
+                    <div style="margin-bottom: 3px;"><span>AI错误计数: </span><span id="ai-error-count">${this.aiErrorCount}</span></div>
                     <button id="save-ai-key" style="width: 100%; padding: 4px; background: #2196F3; color: white; border: none; border-radius: 3px; cursor: pointer; margin-top: 5px;">保存AI配置</button>
+                    <button id="reset-ai-errors" style="width: 100%; padding: 4px; background: #ff9800; color: white; border: none; border-radius: 3px; cursor: pointer; margin-top: 5px;">重置AI错误计数</button>
                 </div>
 
                 <div style="background: #e8f5e8; padding: 8px; border-radius: 4px; margin-bottom: 10px;">
@@ -279,7 +370,7 @@ ${postContent}
                 <div style="font-size: 10px; color: #666; text-align: center; border-top: 1px solid #ddd; padding-top: 5px;">
                     域名: ${CONFIG.domain}<br>
                     间隔: ${CONFIG.minInterval}-${CONFIG.maxInterval}秒 | 小时上限: ${CONFIG.minPostsPerHour}-${CONFIG.maxPostsPerHour}<br>
-                    AI模型: ${CONFIG.aiModel}
+                    AI模型: ${CONFIG.aiModel} | 最大重试: ${CONFIG.aiMaxRetries}次
                 </div>
             `;
 
@@ -290,6 +381,7 @@ ${postContent}
             document.getElementById('force-next-page').addEventListener('click', () => this.forceNextPage());
             document.getElementById('force-check').addEventListener('click', () => this.forceCheck());
             document.getElementById('save-ai-key').addEventListener('click', () => this.saveAIKey());
+            document.getElementById('reset-ai-errors').addEventListener('click', () => this.resetAIErrors());
 
             this.makePanelDraggable(panel);
         }
@@ -299,10 +391,17 @@ ${postContent}
             if (newKey) {
                 this.aiApiKey = newKey;
                 GM_setValue(STORAGE_KEYS.AI_API_KEY, newKey);
-                this.updateStatus('AI API Key已更新');
+                this.resetAIErrorCount(); // 更换Key时重置错误计数
+                this.updateStatus('AI API Key已更新，错误计数已重置');
             } else {
                 alert('请输入有效的API Key');
             }
+        }
+
+        resetAIErrors() {
+            this.resetAIErrorCount();
+            this.updateStatus('AI错误计数已重置');
+            this.updatePanel();
         }
 
         // 简化的执行回复逻辑
@@ -338,7 +437,6 @@ ${postContent}
 
             // 获取帖子内容并生成AI回复
             try {
-                // 修改：使用新的获取帖子内容方法
                 const postContent = this.getPostContent();
                 if (!postContent) {
                     throw new Error('无法获取帖子内容');
@@ -367,7 +465,7 @@ ${postContent}
                     }
                 }
             } catch (error) {
-                this.updateStatus(`AI回复失败: ${error.message}，跳过此帖`);
+                this.updateStatus(`回复失败: ${error.message}，跳过此帖`);
                 setTimeout(() => {
                     window.location.href = `${CONFIG.domain}/forum-10-1.html`;
                 }, 2000);
@@ -376,13 +474,12 @@ ${postContent}
 
         // 简化的回复检查
         setupSimpleReplyCheck(tid) {
-            const maxChecks = RandomUtils.getReplyChecks(); // 使用随机检查次数
+            const maxChecks = RandomUtils.getReplyChecks();
             let checkCount = 0;
 
             const checkInterval = setInterval(() => {
                 checkCount++;
 
-                // 检查是否已跳转到最后一页（回帖成功）
                 if (window.location.href.includes('#lastpost') ||
                     window.location.href.includes('&page=') &&
                     this.checkCurrentPageForUserReply()) {
@@ -395,7 +492,6 @@ ${postContent}
                     return;
                 }
 
-                // 超时检查
                 if (checkCount >= maxChecks) {
                     clearInterval(checkInterval);
                     this.updateStatus('回帖超时，尝试返回列表页');
@@ -450,7 +546,6 @@ ${postContent}
             const currentCount = GM_getValue(STORAGE_KEYS.CURRENT_HOUR_COUNT) + 1;
             GM_setValue(STORAGE_KEYS.CURRENT_HOUR_COUNT, currentCount);
 
-            // 设置下一次回复的随机间隔
             const nextInterval = RandomUtils.getInterval();
             GM_setValue(STORAGE_KEYS.CURRENT_INTERVAL, nextInterval);
         }
@@ -469,7 +564,6 @@ ${postContent}
                     const tid = this.getTidFromUrl(href);
                     const author = authorLink.textContent.trim();
 
-                    // 排除管理员和已回复的帖子
                     if (!this.isAdminUser(authorLink) && !repliedThreads.includes(tid)) {
                         let fullUrl = href;
                         if (!href.startsWith('http')) {
@@ -503,7 +597,7 @@ ${postContent}
             const currentPage = this.getCurrentPageNumber();
             const nextPage = currentPage + 1;
             const searchStartPage = GM_getValue(STORAGE_KEYS.SEARCH_START_PAGE, 1);
-            const maxPageSearch = RandomUtils.getPageSearch(); // 使用随机页面搜索范围
+            const maxPageSearch = RandomUtils.getPageSearch();
 
             if (nextPage > searchStartPage + maxPageSearch - 1) {
                 this.updateStatus(`已搜索 ${maxPageSearch} 页，回到起始页`);
@@ -516,7 +610,6 @@ ${postContent}
             window.location.href = `${CONFIG.domain}/forum-10-${nextPage}.html`;
         }
 
-        // 保留的核心功能（增加随机性）
         checkDatabaseError() {
             if (document.body.innerHTML.includes('Discuz! Database Error')) {
                 const delay = RandomUtils.getErrorRefreshDelay();
@@ -547,12 +640,13 @@ ${postContent}
             if (!GM_getValue(STORAGE_KEYS.CURRENT_PAGE)) GM_setValue(STORAGE_KEYS.CURRENT_PAGE, 1);
             if (!GM_getValue(STORAGE_KEYS.SEARCH_START_PAGE)) GM_setValue(STORAGE_KEYS.SEARCH_START_PAGE, 1);
             if (!GM_getValue(STORAGE_KEYS.CURRENT_INTERVAL)) GM_setValue(STORAGE_KEYS.CURRENT_INTERVAL, RandomUtils.getInterval());
+            if (!GM_getValue(STORAGE_KEYS.AI_ERROR_COUNT)) GM_setValue(STORAGE_KEYS.AI_ERROR_COUNT, 0);
+            if (!GM_getValue(STORAGE_KEYS.LAST_AI_ERROR_TIME)) GM_setValue(STORAGE_KEYS.LAST_AI_ERROR_TIME, 0);
             this.checkHourReset();
         }
 
         getCurrentHourTimestamp() {
             const now = new Date();
-            // 修复：使用更精确的小时时间戳，避免边界问题
             return Math.floor(now.getTime() / (60 * 60 * 1000));
         }
 
@@ -572,15 +666,12 @@ ${postContent}
             const currentHourTimestamp = this.getCurrentHourTimestamp();
             const storedHourTimestamp = GM_getValue(STORAGE_KEYS.CURRENT_HOUR_START);
 
-            // 修复：添加更严格的小时变化检测
             if (currentHourTimestamp !== storedHourTimestamp) {
-                // 新的一小时，重置计数并生成新的随机值
                 GM_setValue(STORAGE_KEYS.CURRENT_HOUR_COUNT, 0);
                 GM_setValue(STORAGE_KEYS.CURRENT_HOUR_LIMIT, RandomUtils.getPostsPerHour());
                 GM_setValue(STORAGE_KEYS.CURRENT_INTERVAL, RandomUtils.getInterval());
                 GM_setValue(STORAGE_KEYS.CURRENT_HOUR_START, currentHourTimestamp);
                 
-                // 修复：重置搜索起始页，避免无限翻页
                 GM_setValue(STORAGE_KEYS.SEARCH_START_PAGE, 1);
                 GM_setValue(STORAGE_KEYS.CURRENT_PAGE, 1);
 
@@ -588,7 +679,6 @@ ${postContent}
                 const newInterval = GM_getValue(STORAGE_KEYS.CURRENT_INTERVAL);
                 this.updateStatus(`新的一小时开始，重置计数 - 上限:${newLimit}帖/小时, 间隔:${newInterval}秒`);
                 
-                // 修复：强制刷新页面以重新开始搜索
                 setTimeout(() => {
                     window.location.href = `${CONFIG.domain}/forum-10-1.html`;
                 }, 2000);
@@ -648,6 +738,7 @@ ${postContent}
             document.getElementById('current-page').textContent = currentPage;
             document.getElementById('replied-count').textContent = repliedThreads.length;
             document.getElementById('today-count').textContent = this.getTodayReplyCount();
+            document.getElementById('ai-error-count').textContent = this.aiErrorCount;
 
             const currentTime = new Date();
             document.getElementById('current-time').textContent = currentTime.toLocaleTimeString();
@@ -703,7 +794,6 @@ ${postContent}
             const currentHourLimit = GM_getValue(STORAGE_KEYS.CURRENT_HOUR_LIMIT);
             const currentInterval = GM_getValue(STORAGE_KEYS.CURRENT_INTERVAL);
 
-            // 修复：先检查小时重置
             this.checkHourReset();
 
             if (currentCount >= currentHourLimit) {
@@ -779,6 +869,7 @@ ${postContent}
                 GM_setValue(STORAGE_KEYS.LAST_REPLY_TIME, null);
                 GM_setValue(STORAGE_KEYS.CURRENT_PAGE, 1);
                 GM_setValue(STORAGE_KEYS.SEARCH_START_PAGE, 1);
+                this.resetAIErrorCount();
                 this.updatePanel();
                 this.updateStatus('数据已重置');
                 alert('数据已重置');
@@ -801,7 +892,6 @@ ${postContent}
         async startAutoReply() {
             if (!this.isAutoReplyEnabled) return;
 
-            // 修复：强制检查小时重置
             this.checkHourReset();
 
             if (!this.canReplyNow()) {
@@ -829,7 +919,6 @@ ${postContent}
                 console.error('自动回帖出错:', error);
                 this.updateStatus('出错: ' + error.message);
                 
-                // 修复：出错时也重置页面状态
                 setTimeout(() => {
                     window.location.href = `${CONFIG.domain}/forum-10-1.html`;
                 }, 3000);
@@ -852,7 +941,6 @@ ${postContent}
         }
 
         canReplyNow() {
-            // 修复：先检查小时重置
             this.checkHourReset();
             
             const currentCount = GM_getValue(STORAGE_KEYS.CURRENT_HOUR_COUNT);
