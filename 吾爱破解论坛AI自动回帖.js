@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         吾爱破解论坛AI自动回帖
 // @namespace    http://tampermonkey.net/
-// @version      1.2.2
+// @version      1.2.3
 // @description  使用AI在吾爱破解论坛自动回帖，根据帖子内容生成智能回复
 // @author       逝去de枫
 // @match        https://www.52pojie.cn/forum-10-*.html
@@ -109,6 +109,29 @@
 
             // 新增：检查是否需要因错误频率而暂停
             this.checkErrorPauseStatus();
+        }
+
+        // 新增：检查帖子是否已关闭
+        isThreadClosed() {
+            // 检测主题关闭的提示元素
+            const closedElement = document.querySelector('div.area div.pt.hm');
+            if (closedElement && closedElement.textContent.includes('抱歉，本主题已关闭，不再接受新内容')) {
+                return true;
+            }
+            
+            // 检测回复按钮是否不可用
+            const replyButton = document.querySelector('#fastpostsubmit');
+            if (replyButton && (replyButton.disabled || replyButton.style.display === 'none')) {
+                return true;
+            }
+            
+            // 检测回复区域是否被隐藏
+            const replyArea = document.querySelector('#fastpostform');
+            if (replyArea && replyArea.style.display === 'none') {
+                return true;
+            }
+            
+            return false;
         }
 
         // 新增：检查错误暂停状态
@@ -328,7 +351,7 @@ ${postContent}
 
             panel.innerHTML = `
                 <div style="font-weight: bold; color: #4CAF50; margin-bottom: 10px; text-align: center; font-size: 14px;">
-                    吾爱破解AI自动回帖 v1.2.2
+                    吾爱破解AI自动回帖 v1.2.3
                 </div>
 
                 <!-- 随机配置信息 -->
@@ -412,7 +435,7 @@ ${postContent}
             }
         }
 
-        // 简化的执行回复逻辑
+        // 简化的执行回复逻辑 - 新增主题关闭检测
         async executeReply() {
             if (this.checkDatabaseError()) return;
 
@@ -426,6 +449,29 @@ ${postContent}
             const repliedThreads = GM_getValue(STORAGE_KEYS.REPLIED_THREADS);
             if (repliedThreads.includes(tid)) {
                 this.updateStatus('检测到已回复过此帖，返回列表页');
+                setTimeout(() => {
+                    window.location.href = `${CONFIG.domain}/forum-10-1.html`;
+                }, 2000);
+                return;
+            }
+
+            // 新增：检测主题是否已关闭
+            if (this.isThreadClosed()) {
+                this.updateStatus('检测到主题已关闭，记录tid并跳过');
+                // 将关闭的主题记录为已回复，避免再次尝试
+                repliedThreads.push(tid);
+                GM_setValue(STORAGE_KEYS.REPLIED_THREADS, repliedThreads);
+                
+                // 记录到回复历史
+                const replyHistory = GM_getValue(STORAGE_KEYS.REPLY_HISTORY);
+                replyHistory.push({ 
+                    tid: tid, 
+                    timestamp: Date.now(), 
+                    content: '主题已关闭，自动跳过',
+                    type: 'closed_thread'
+                });
+                GM_setValue(STORAGE_KEYS.REPLY_HISTORY, replyHistory);
+                
                 setTimeout(() => {
                     window.location.href = `${CONFIG.domain}/forum-10-1.html`;
                 }, 2000);
