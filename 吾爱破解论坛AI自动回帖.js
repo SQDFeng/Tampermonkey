@@ -356,6 +356,18 @@ ${postContent}
             return false;
         }
 
+        // 检测权限贴
+        isPermissionRequiredPost() {
+            const permissionElement = document.querySelector('div.f_c.altw div#messagetext.alert_error');
+            if (permissionElement) {
+                const permissionText = permissionElement.textContent;
+                if (permissionText.includes('抱歉，本帖要求阅读权限高于') && permissionText.includes('才能浏览')) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         checkErrorPauseStatus() {
             const pauseUntil = GM_getValue(STORAGE_KEYS.PAUSE_UNTIL, 0);
             const now = Date.now();
@@ -576,6 +588,27 @@ ${postContent}
                     timestamp: Date.now(),
                     content: '主题已关闭，自动跳过',
                     type: 'closed_thread'
+                });
+                GM_setValue(STORAGE_KEYS.REPLY_HISTORY, replyHistory);
+
+                setTimeout(() => {
+                    window.location.href = `${CONFIG.domain}/forum-10-1.html`;
+                }, 2000);
+                return;
+            }
+
+            // 检测权限贴
+            if (this.isPermissionRequiredPost()) {
+                this.updateStatus('检测到权限贴，记录tid并跳过');
+                repliedThreads.push(tid);
+                GM_setValue(STORAGE_KEYS.REPLIED_THREADS, repliedThreads);
+
+                const replyHistory = GM_getValue(STORAGE_KEYS.REPLY_HISTORY);
+                replyHistory.push({
+                    tid: tid,
+                    timestamp: Date.now(),
+                    content: '权限不足，自动跳过',
+                    type: 'permission_required'
                 });
                 GM_setValue(STORAGE_KEYS.REPLY_HISTORY, replyHistory);
 
