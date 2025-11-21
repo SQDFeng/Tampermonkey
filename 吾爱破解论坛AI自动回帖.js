@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         吾爱破解论坛AI自动回帖
 // @namespace    http://tampermonkey.net/
-// @version      1.2.7
+// @version      1.2.8
 // @description  使用AI在吾爱破解论坛自动回帖，根据帖子内容生成智能回复，支持双AI降级
 // @author       逝去de枫
 // @match        https://www.52pojie.cn/forum-10-*.html
@@ -25,12 +25,12 @@
         username: '你的ID',
 
         // 回帖间隔时间区间（秒）
-        minInterval: 50,  // 50秒
-        maxInterval: 120,  // 2分钟
+        minInterval: 240,  // 4分钟
+        maxInterval: 420,  // 7分钟
 
         // 每小时回帖次数区间
-        minPostsPerHour: 24,
-        maxPostsPerHour: 35,
+        minPostsPerHour: 9,
+        maxPostsPerHour: 15,
 
         // 页面搜索区间
         minPageSearch: 5,
@@ -59,6 +59,9 @@
         errorPause5min: 5 * 60,    // 暂停5分钟（秒）
         errorThreshold1hour: 10,    // 1小时内错误超过10次
         errorPause1hour: 0.2 * 60 * 60, // 暂停0.2小时（秒）
+
+        // 帖子时间限制（小时）
+        maxPostAge: 48, // 超过48小时的帖子不回复
 
         // AI服务配置
         aiServices: {
@@ -472,6 +475,41 @@ ${postContent}
             return null;
         }
 
+        // 获取网页服务器时间
+        getServerTime() {
+            const timeElement = document.querySelector('p.xs0');
+            if (timeElement) {
+                const timeText = timeElement.textContent.trim();
+                const timeMatch = timeText.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2})/);
+                if (timeMatch) {
+                    return new Date(timeMatch[1].replace(' ', 'T') + ':00');
+                }
+            }
+            // 如果无法获取服务器时间，使用本地时间
+            return new Date();
+        }
+
+        // 解析帖子发布时间
+        getPostTime(postElement) {
+            const timeElement = postElement.querySelector('p.res-ti');
+            if (timeElement) {
+                const timeText = timeElement.textContent.trim();
+                const timeMatch = timeText.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2})/);
+                if (timeMatch) {
+                    return new Date(timeMatch[1].replace(' ', 'T') + ':00');
+                }
+            }
+            return null;
+        }
+
+        // 检查帖子是否超过时间限制
+        isPostTooOld(postTime) {
+            const serverTime = this.getServerTime();
+            const timeDiff = serverTime.getTime() - postTime.getTime();
+            const hoursDiff = timeDiff / (1000 * 60 * 60);
+            return hoursDiff > CONFIG.maxPostAge;
+        }
+
         // 控制面板
         createControlPanel() {
             const panel = document.createElement('div');
@@ -488,7 +526,7 @@ ${postContent}
 
             panel.innerHTML = `
                 <div style="font-weight: bold; color: #4CAF50; margin-bottom: 10px; text-align: center; font-size: 14px;">
-                    吾爱破解AI自动回帖 v1.2.7
+                    吾爱破解AI自动回帖 v1.2.8
                 </div>
 
                 <!-- 随机配置信息 -->
@@ -497,6 +535,7 @@ ${postContent}
                     <div style="margin-bottom: 3px;"><span>当前小时上限: </span><span id="current-hour-limit">${currentHourLimit}</span> 帖/小时</div>
                     <div style="margin-bottom: 3px;"><span>当前回帖间隔: </span><span id="current-interval">${currentInterval}</span> 秒</div>
                     <div style="margin-bottom: 3px;"><span>页面搜索范围: </span><span id="page-search-range">${CONFIG.minPageSearch}-${CONFIG.maxPageSearch}</span> 页</div>
+                    <div style="margin-bottom: 3px;"><span>帖子时间限制: </span><span id="post-age-limit">${CONFIG.maxPostAge}</span> 小时</div>
                     <div style="font-size: 10px; color: #666;">每次重置时随机生成新值</div>
                 </div>
 
@@ -544,7 +583,7 @@ ${postContent}
                 <div style="font-size: 10px; color: #666; text-align: center; border-top: 1px solid #ddd; padding-top: 5px;">
                     域名: ${CONFIG.domain}<br>
                     间隔: ${CONFIG.minInterval}-${CONFIG.maxInterval}秒 | 小时上限: ${CONFIG.minPostsPerHour}-${CONFIG.maxPostsPerHour}<br>
-                    AI服务: Gemini → DeepSeek
+                    帖子时间限制: ${CONFIG.maxPostAge}小时 | AI服务: Gemini → DeepSeek
                 </div>
             `;
 
@@ -744,6 +783,7 @@ ${postContent}
             const repliedThreads = GM_getValue(STORAGE_KEYS.REPLIED_THREADS);
             const posts = [];
             const postElements = document.querySelectorAll('tbody[id^="normalthread_"]');
+            let oldPostsCount = 0;
 
             postElements.forEach(element => {
                 const titleLink = element.querySelector('th a.s.xst');
@@ -755,6 +795,28 @@ ${postContent}
                     const author = authorLink.textContent.trim();
 
                     if (!this.isAdminUser(authorLink) && !repliedThreads.includes(tid)) {
+                        // 检查帖子时间
+                        const postTime = this.getPostTime(element);
+                        if (postTime) {
+                            if (this.isPostTooOld(postTime)) {
+                                // 帖子超过时间限制，记录到已回复列表
+                                repliedThreads.push(tid);
+                                GM_setValue(STORAGE_KEYS.REPLIED_THREADS, repliedThreads);
+
+                                const replyHistory = GM_getValue(STORAGE_KEYS.REPLY_HISTORY);
+                                replyHistory.push({
+                                    tid: tid,
+                                    timestamp: Date.now(),
+                                    content: '帖子超过时间限制，自动跳过',
+                                    type: 'old_post'
+                                });
+                                GM_setValue(STORAGE_KEYS.REPLY_HISTORY, replyHistory);
+
+                                oldPostsCount++;
+                                return; // 跳过这个帖子
+                            }
+                        }
+
                         let fullUrl = href;
                         if (!href.startsWith('http')) {
                             fullUrl = CONFIG.domain + '/' + href;
@@ -765,11 +827,17 @@ ${postContent}
                             href: href,
                             fullUrl: fullUrl,
                             tid: tid,
-                            author: author
+                            author: author,
+                            postTime: postTime
                         });
                     }
                 }
             });
+
+            if (oldPostsCount > 0) {
+                this.updateStatus(`跳过 ${oldPostsCount} 个超过${CONFIG.maxPostAge}小时的旧帖`);
+            }
+
             return posts;
         }
 
@@ -931,6 +999,7 @@ ${postContent}
             document.getElementById('replied-count').textContent = repliedThreads.length;
             document.getElementById('today-count').textContent = this.getTodayReplyCount();
             document.getElementById('current-ai-service').textContent = CONFIG.aiServices[this.currentAiService].name;
+            document.getElementById('post-age-limit').textContent = CONFIG.maxPostAge;
 
             const currentTime = new Date();
             document.getElementById('current-time').textContent = currentTime.toLocaleTimeString();
