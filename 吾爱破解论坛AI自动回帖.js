@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         吾爱破解论坛AI自动回帖
 // @namespace    http://tampermonkey.net/
-// @version      1.2.8
+// @version      1.2.9
 // @description  使用AI在吾爱破解论坛自动回帖，根据帖子内容生成智能回复，支持双AI降级
 // @author       逝去de枫
 // @match        https://www.52pojie.cn/forum-10-*.html
@@ -34,7 +34,7 @@
 
         // 页面搜索区间
         minPageSearch: 5,
-        maxPageSearch: 25,
+        maxPageSearch: 10,
 
         // 超时时间区间（毫秒）
         minTimeout: 25000,
@@ -79,7 +79,12 @@
                 model: 'deepseek-chat',
                 enabled: true
             }
-        }
+        },
+
+        // 翻页延迟和无结果休眠
+        pageTurnDelay: 500,          // 翻页延迟（毫秒）
+        maxEmptyPages: 20,          // 最大允许的空结果页数
+        longSleepDuration: 1 * 60 * 60 * 1000 // 长时间休眠时长（1小时，毫秒）
     };
 
     // 获取随机值的辅助函数
@@ -107,7 +112,10 @@
         CURRENT_INTERVAL: 'current_interval',
         ERROR_HISTORY: 'error_history',
         PAUSE_UNTIL: 'pause_until',
-        CURRENT_AI_SERVICE: 'current_ai_service'
+        CURRENT_AI_SERVICE: 'current_ai_service',
+        // 新增存储键
+        EMPTY_PAGES_COUNT: 'empty_pages_count',        // 连续空页计数
+        LONG_SLEEP_UNTIL: 'long_sleep_until'           // 长时间休眠结束时间
     };
 
     class AutoReplyManager {
@@ -128,6 +136,39 @@
             this.updatePanel();
             this.startStatusUpdateLoop();
             this.checkErrorPauseStatus();
+            this.checkLongSleepStatus(); // 检查长时间休眠状态
+        }
+
+        // 检查长时间休眠状态
+        checkLongSleepStatus() {
+            const longSleepUntil = GM_getValue(STORAGE_KEYS.LONG_SLEEP_UNTIL, 0);
+            const now = Date.now();
+
+            if (longSleepUntil > now) {
+                const remainingMinutes = Math.ceil((longSleepUntil - now) / (60 * 1000));
+                this.updateStatus(`长时间休眠中，${remainingMinutes}分钟后恢复`);
+                this.isAutoReplyEnabled = false;
+                GM_setValue(STORAGE_KEYS.AUTO_REPLY_ENABLED, false);
+
+                const button = document.getElementById('toggle-auto-reply');
+                if (button) {
+                    button.textContent = '▶️ 开始自动回帖';
+                    button.style.background = '#f44336';
+                }
+
+                setTimeout(() => {
+                    GM_setValue(STORAGE_KEYS.LONG_SLEEP_UNTIL, 0);
+                    GM_setValue(STORAGE_KEYS.EMPTY_PAGES_COUNT, 0); // 重置空页计数
+                    this.isAutoReplyEnabled = true;
+                    GM_setValue(STORAGE_KEYS.AUTO_REPLY_ENABLED, true);
+                    this.updateStatus('长时间休眠结束，重新开始工作');
+                    this.checkAndStartAutoReply();
+                }, longSleepUntil - now);
+
+                return true;
+            }
+
+            return false;
         }
 
         // 获取当前可用的AI服务
@@ -523,10 +564,11 @@ ${postContent}
 
             const currentHourLimit = GM_getValue(STORAGE_KEYS.CURRENT_HOUR_LIMIT, CONFIG.minPostsPerHour);
             const currentInterval = GM_getValue(STORAGE_KEYS.CURRENT_INTERVAL, CONFIG.minInterval);
+            const emptyPagesCount = GM_getValue(STORAGE_KEYS.EMPTY_PAGES_COUNT, 0);
 
             panel.innerHTML = `
                 <div style="font-weight: bold; color: #4CAF50; margin-bottom: 10px; text-align: center; font-size: 14px;">
-                    吾爱破解AI自动回帖 v1.2.8
+                    吾爱破解AI自动回帖 v1.2.9
                 </div>
 
                 <!-- 随机配置信息 -->
@@ -545,6 +587,15 @@ ${postContent}
                     <div style="margin-bottom: 3px;"><span>当前AI: </span><span id="current-ai-service">${CONFIG.aiServices[this.currentAiService].name}</span></div>
                     <div style="margin-bottom: 3px;"><span>备用AI: </span><span>${CONFIG.aiServices.deepseek.enabled ? '✅ DeepSeek' : '❌ DeepSeek'}</span></div>
                     <div style="font-size: 10px; color: #666;">Gemini故障时自动切换到DeepSeek</div>
+                </div>
+
+                <!-- 新增：翻页和休眠状态 -->
+                <div style="background: #f3e5f5; padding: 8px; border-radius: 4px; margin-bottom: 10px;">
+                    <div style="font-weight: bold; color: #7b1fa2; margin-bottom: 5px;">翻页控制状态:</div>
+                    <div style="margin-bottom: 3px;"><span>连续空页数: </span><span id="empty-pages-count">${emptyPagesCount}</span> / <span id="max-empty-pages">${CONFIG.maxEmptyPages}</span></div>
+                    <div style="margin-bottom: 3px;"><span>翻页延迟: </span><span id="page-turn-delay">${CONFIG.pageTurnDelay}</span> 毫秒</div>
+                    <div style="margin-bottom: 3px;"><span>休眠时长: </span><span id="long-sleep-duration">${CONFIG.longSleepDuration / (60 * 60 * 1000)}</span> 小时</div>
+                    <div style="font-size: 10px; color: #666;">连续${CONFIG.maxEmptyPages}页无结果将暂停${CONFIG.longSleepDuration / (60 * 60 * 1000)}小时</div>
                 </div>
 
                 <div style="background: #e8f5e8; padding: 8px; border-radius: 4px; margin-bottom: 10px;">
@@ -583,7 +634,8 @@ ${postContent}
                 <div style="font-size: 10px; color: #666; text-align: center; border-top: 1px solid #ddd; padding-top: 5px;">
                     域名: ${CONFIG.domain}<br>
                     间隔: ${CONFIG.minInterval}-${CONFIG.maxInterval}秒 | 小时上限: ${CONFIG.minPostsPerHour}-${CONFIG.maxPostsPerHour}<br>
-                    帖子时间限制: ${CONFIG.maxPostAge}小时 | AI服务: Gemini → DeepSeek
+                    帖子时间限制: ${CONFIG.maxPostAge}小时 | AI服务: Gemini → DeepSeek<br>
+                    翻页延迟: ${CONFIG.pageTurnDelay}ms | 空页限制: ${CONFIG.maxEmptyPages}页
                 </div>
             `;
 
@@ -777,6 +829,10 @@ ${postContent}
 
             const nextInterval = RandomUtils.getInterval();
             GM_setValue(STORAGE_KEYS.CURRENT_INTERVAL, nextInterval);
+
+            // 重置空页计数（找到有效帖子）
+            GM_setValue(STORAGE_KEYS.EMPTY_PAGES_COUNT, 0);
+            this.updateStatus(`成功回复帖子，重置空页计数`);
         }
 
         getAvailablePosts() {
@@ -852,6 +908,10 @@ ${postContent}
         }
 
         async goToNextPage() {
+            // 新增：翻页延迟
+            this.updateStatus(`翻页延迟 ${CONFIG.pageTurnDelay}ms...`);
+            await this.delay(CONFIG.pageTurnDelay);
+
             const currentPage = this.getCurrentPageNumber();
             const nextPage = currentPage + 1;
             const searchStartPage = GM_getValue(STORAGE_KEYS.SEARCH_START_PAGE, 1);
@@ -902,6 +962,9 @@ ${postContent}
             if (!GM_getValue(STORAGE_KEYS.ERROR_HISTORY)) GM_setValue(STORAGE_KEYS.ERROR_HISTORY, []);
             if (!GM_getValue(STORAGE_KEYS.PAUSE_UNTIL)) GM_setValue(STORAGE_KEYS.PAUSE_UNTIL, 0);
             if (!GM_getValue(STORAGE_KEYS.CURRENT_AI_SERVICE)) GM_setValue(STORAGE_KEYS.CURRENT_AI_SERVICE, 'gemini');
+            // 新增存储初始化
+            if (!GM_getValue(STORAGE_KEYS.EMPTY_PAGES_COUNT)) GM_setValue(STORAGE_KEYS.EMPTY_PAGES_COUNT, 0);
+            if (!GM_getValue(STORAGE_KEYS.LONG_SLEEP_UNTIL)) GM_setValue(STORAGE_KEYS.LONG_SLEEP_UNTIL, 0);
             this.checkHourReset();
         }
 
@@ -989,6 +1052,7 @@ ${postContent}
             const lastReplyTime = GM_getValue(STORAGE_KEYS.LAST_REPLY_TIME);
             const currentPage = GM_getValue(STORAGE_KEYS.CURRENT_PAGE);
             const repliedThreads = GM_getValue(STORAGE_KEYS.REPLIED_THREADS);
+            const emptyPagesCount = GM_getValue(STORAGE_KEYS.EMPTY_PAGES_COUNT, 0);
 
             // 更新显示值
             document.getElementById('current-hour-count').textContent = currentCount;
@@ -1000,6 +1064,12 @@ ${postContent}
             document.getElementById('today-count').textContent = this.getTodayReplyCount();
             document.getElementById('current-ai-service').textContent = CONFIG.aiServices[this.currentAiService].name;
             document.getElementById('post-age-limit').textContent = CONFIG.maxPostAge;
+
+            // 新增：更新翻页控制状态
+            document.getElementById('empty-pages-count').textContent = emptyPagesCount;
+            document.getElementById('max-empty-pages').textContent = CONFIG.maxEmptyPages;
+            document.getElementById('page-turn-delay').textContent = CONFIG.pageTurnDelay;
+            document.getElementById('long-sleep-duration').textContent = CONFIG.longSleepDuration / (60 * 60 * 1000);
 
             const currentTime = new Date();
             document.getElementById('current-time').textContent = currentTime.toLocaleTimeString();
@@ -1131,6 +1201,9 @@ ${postContent}
                 GM_setValue(STORAGE_KEYS.ERROR_HISTORY, []);
                 GM_setValue(STORAGE_KEYS.PAUSE_UNTIL, 0);
                 GM_setValue(STORAGE_KEYS.CURRENT_AI_SERVICE, 'gemini');
+                // 新增：重置空页计数和休眠状态
+                GM_setValue(STORAGE_KEYS.EMPTY_PAGES_COUNT, 0);
+                GM_setValue(STORAGE_KEYS.LONG_SLEEP_UNTIL, 0);
                 this.currentAiService = 'gemini';
                 this.updatePanel();
                 this.updateStatus('数据已重置');
@@ -1157,6 +1230,11 @@ ${postContent}
 
         async startAutoReply() {
             if (!this.isAutoReplyEnabled) return;
+
+            // 检查长时间休眠状态
+            if (this.checkLongSleepStatus()) {
+                return;
+            }
 
             if (!this.canReplyNow()) {
                 const currentCount = GM_getValue(STORAGE_KEYS.CURRENT_HOUR_COUNT);
@@ -1193,7 +1271,29 @@ ${postContent}
 
                 window.location.href = randomPost.fullUrl;
             } else {
-                this.updateStatus('当前页面没有可回复的帖子，尝试翻页...');
+                // 没有找到可回复帖子，增加空页计数
+                const emptyPagesCount = GM_getValue(STORAGE_KEYS.EMPTY_PAGES_COUNT, 0) + 1;
+                GM_setValue(STORAGE_KEYS.EMPTY_PAGES_COUNT, emptyPagesCount);
+
+                this.updateStatus(`当前页面没有可回复的帖子 (连续空页: ${emptyPagesCount}/${CONFIG.maxEmptyPages})`);
+
+                // 检查是否达到最大空页限制
+                if (emptyPagesCount >= CONFIG.maxEmptyPages) {
+                    const longSleepUntil = Date.now() + CONFIG.longSleepDuration;
+                    GM_setValue(STORAGE_KEYS.LONG_SLEEP_UNTIL, longSleepUntil);
+                    this.updateStatus(`连续${emptyPagesCount}页无结果，暂停工作${CONFIG.longSleepDuration / (60 * 60 * 1000)}小时`);
+                    this.isAutoReplyEnabled = false;
+                    GM_setValue(STORAGE_KEYS.AUTO_REPLY_ENABLED, false);
+
+                    const button = document.getElementById('toggle-auto-reply');
+                    if (button) {
+                        button.textContent = '▶️ 开始自动回帖';
+                        button.style.background = '#f44336';
+                    }
+                    return;
+                }
+
+                this.updateStatus('尝试翻页...');
                 await this.goToNextPage();
             }
         }
